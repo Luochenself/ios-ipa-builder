@@ -1,0 +1,165 @@
+name: 编译任意 iOS 项目
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: '项目地址（owner/name 或完整 https URL）'
+        required: true
+        type: string
+      ref:
+        description: '分支 / tag / commit'
+        required: false
+        default: 'main'
+        type: string
+      kind:
+        description: '项目类型'
+        required: false
+        default: 'auto'
+        type: choice
+        options: [auto, flutter, rn, xcode]
+      app_name:
+        description: '产物文件名（不带 .ipa）'
+        required: false
+        default: 'app'
+        type: string
+      flutter_ver:
+        description: 'Flutter 版本（仅 Flutter 项目）'
+        required: false
+        default: '3.27.4'
+        type: string
+      sub_dir:
+        description: '项目在子目录时填，留空=仓库根目录'
+        required: false
+        default: ''
+        type: string
+      scheme:
+        description: '手动指定 Xcode scheme（留空自动探测）'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出本仓库脚本
+        uses: actions/checkout@v4
+
+      - name: 显示参数
+        run: |
+          echo "项目:   ${{ inputs.repo }}"
+          echo "分支:   ${{ inputs.ref }}"
+          echo "类型:   ${{ inputs.kind }}"
+          echo "产物:   ${{ inputs.app_name }}.ipa"
+          echo "子目录: ${{ inputs.sub_dir }}"
+          xcodebuild -version
+          sw_vers
+
+      - name: 拉取源码
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ inputs.repo }}"
+          case "$REPO" in
+            http*) URL="$REPO" ;;
+            */*)   URL="https://github.com/$REPO" ;;
+            *)     echo "ERROR: 项目地址格式不对，应为 owner/name 或完整 URL"; exit 1 ;;
+          esac
+          if [ -n "$SOURCE_TOKEN" ]; then
+            URL=$(echo "$URL" | sed "s#https://#https://x-access-token:${SOURCE_TOKEN}@#")
+          fi
+          echo "克隆 $URL"
+          git clone --depth 1 --branch "${{ inputs.ref }}" --recurse-submodules "$URL" "$RUNNER_TEMP/src" \
+            || git clone --depth 1 --recurse-submodules "$URL" "$RUNNER_TEMP/src"
+          cd "$RUNNER_TEMP/src"
+          echo "提交: $(git rev-parse --short HEAD)"
+          ls -la | head -40
+
+      - name: 判断项目类型
+        id: detect
+        run: |
+          set -e
+          SRC="$RUNNER_TEMP/src"
+          if [ -n "${{ inputs.sub_dir }}" ]; then
+            SRC="$SRC/${{ inputs.sub_dir }}"
+          fi
+          if [ ! -d "$SRC" ]; then
+            echo "ERROR: 子目录不存在: $SRC"; exit 1
+          fi
+          KIND="${{ inputs.kind }}"
+          if [ "$KIND" = "auto" ]; then
+            KIND=$(sh "$GITHUB_WORKSPACE/scripts/detect.sh" "$SRC")
+            echo "自动判断结果: $KIND"
+          fi
+          if [ "$KIND" = "unknown" ]; then
+            echo "ERROR: 无法判断项目类型，请手动指定 kind"
+            find "$SRC" -maxdepth 2 \( -name '*.xcodeproj' -o -name 'pubspec.yaml' -o -name 'package.json' \) | head
+            exit 1
+          fi
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Flutter
+        if: steps.detect.outputs.kind == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter_ver }}
+          channel: stable
+          cache: true
+
+      - name: 安装 Node
+        if: steps.detect.outputs.kind == 'rn'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 构建 Flutter
+        if: steps.detect.outputs.kind == 'flutter'
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/build-flutter.sh" \
+            "${{ steps.detect.outputs.src }}" "${{ inputs.app_name }}"
+
+      - name: 构建 原生 / RN
+        if: steps.detect.outputs.kind == 'xcode' || steps.detect.outputs.kind == 'rn'
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/build-xcode.sh" \
+            "${{ steps.detect.outputs.src }}" "${{ inputs.app_name }}" "${{ inputs.scheme }}"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app_name }}-unsigned
+          path: ${{ inputs.app_name }}-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="ipa-$(date +%Y%m%d-%H%M%S)-r${{ github.run_number }}"
+          {
+            echo "## ${{ inputs.app_name }}"
+            echo ""
+            echo "- 来源仓库: ${{ inputs.repo }}"
+            echo "- 分支/提交: ${{ inputs.ref }}"
+            echo "- 类型: ${{ steps.detect.outputs.kind }}"
+            echo "- 运行编号: #${{ github.run_number }}"
+            echo ""
+            echo "产物为无签名 IPA，安装方式自行处理（TrollStore / 自签工具）。"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" \
+            "${{ inputs.app_name }}-unsigned.ipa" \
+            --title "${{ inputs.app_name }} $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest
+          echo "下载地址:"
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ inputs.app_name }}-unsigned.ipa"
