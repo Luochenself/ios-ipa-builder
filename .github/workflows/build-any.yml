@@ -45,7 +45,7 @@ permissions:
 jobs:
   build:
     name: 编译
-    runs-on: macos-13
+    runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - name: 检出本仓库脚本
