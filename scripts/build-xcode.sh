@@ -57,6 +57,20 @@ if [ -z "$SCHEME" ]; then
 fi
 echo "scheme: $SCHEME"
 
+echo "===== install ldid (Cyanide XPF) ====="
+if ! command -v ldid >/dev/null 2>&1; then
+  brew install ldid || true
+fi
+if ! command -v ldid >/dev/null 2>&1; then
+  curl -fsSL -o /usr/local/bin/ldid https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macos_arm64 \
+    || curl -fsSL -o /usr/local/bin/ldid https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macos_x86_64 \
+    || true
+  [ -f /usr/local/bin/ldid ] && chmod +x /usr/local/bin/ldid
+fi
+command -v ldid
+ldid 2>&1 | head -n 2 || true
+
+
 echo "===== 归档（无签名）====="
 set -o pipefail
 xcodebuild archive \
